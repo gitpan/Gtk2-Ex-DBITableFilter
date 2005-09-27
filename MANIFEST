@@ -7,3 +7,5 @@ lib/Gtk2/Ex/DBITableFilter.pm
 t/00.load.t
 t/pod-coverage.t
 t/pod.t
+examples/filtered-table.pl
+examples/filtered-table-sqlite.pl

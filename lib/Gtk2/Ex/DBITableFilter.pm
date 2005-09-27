@@ -1,6 +1,6 @@
 package Gtk2::Ex::DBITableFilter;
 
-our $VERSION = '0.01';
+our $VERSION = '0.02';
 
 use strict;
 use warnings;
@@ -8,7 +8,6 @@ use Carp;
 use Gtk2::Ex::Simple::List;
 use Glib qw(TRUE FALSE);
 use Data::Dumper;
-use Storable qw(freeze thaw);
 use Gtk2::Ex::ComboBox;
 
 sub new {
@@ -21,6 +20,39 @@ sub new {
 	$self->{params} = undef;
 	$self->{progress} = undef;
 	return $self;
+}
+
+sub set_simple_sql {
+	my ($self, $callback) = @_;
+	$self->{methods}->{count} = sub {
+		my ($dbh, $params) = @_;
+		my $sql = &$callback($params);
+		my $countsql = $sql;
+		$countsql = 'select count(*) from ('.$sql.') DBITableFilterTemp';
+		my $sth = $dbh->prepare($countsql);
+		$sth->execute();
+		my @result_array;
+		while (my @ary = $sth->fetchrow_array()) {
+			push @result_array, $ary[0];
+		}
+		return \@result_array;	
+	};
+	$self->{methods}->{fetch} = sub {
+		my ($dbh, $params) = @_;
+		my $sql = &$callback($params);
+		my $fetchsql = $sql;
+		$fetchsql = 'select * from ('.$sql.') DBITableFilterTemp limit '
+			.$params->{limit}->{start}
+			.' , '
+			.$params->{limit}->{step};
+		my $sth = $dbh->prepare($fetchsql);
+		$sth->execute();
+		my @result_array;
+		while (my @ary = $sth->fetchrow_array()) {
+			push @result_array, \@ary;
+		}
+		return \@result_array;	
+	};
 }
 
 sub set_increment {
@@ -43,14 +75,16 @@ sub fetch_using {
 	$self->{methods}->{fetch} = $method;
 }
 
-sub register_thread {
+sub set_thread {
 	my ($self, $thread) = @_;
 	$self->{thread} = $thread;
-	my $fetch_records_query = 
-		$thread->register_query($self, $self->{methods}->{fetch}, \&_post_fetch_records);
+	my $fetch_records_query = $thread->register_query (
+		$self, $self->{methods}->{fetch}, \&_post_fetch_records 
+	);
 	$self->{fetch_records_query} = $fetch_records_query;
-	my $count_records_query = 
-		$thread->register_query($self, $self->{methods}->{count}, \&_post_count_records);
+	my $count_records_query = $thread->register_query (
+		$self, $self->{methods}->{count}, \&_post_count_records 
+	);
 	$self->{count_records_query} = $count_records_query;
 }
 
@@ -150,7 +184,6 @@ sub _update_count {
 	$self->{progress}->{bar}->set_text('Counting');
 	$self->_start_progress(0, 0.4);
 	$self->{count_records_query}->execute($params);
-	$self->_go_to_first;
 }
 
 sub refresh {
@@ -186,10 +219,9 @@ sub _update_params {
 
 sub _post_count_records {
 	my ($self, $result_array) = @_;
-	my @result = thaw $result_array;
-	my $tmp = $result[0];
-	my $count = $tmp->[0];
+	my $count = $result_array->[0];
 	$self->{limit}->{total} = $count;
+	$self->_go_to_first;
 	$self->refresh;
 }
 
@@ -207,10 +239,9 @@ sub _update_progress_label {
 sub _post_fetch_records {
 	my ($self, $result_array) = @_;
 	$self->_update_progress_label('Rendering');
-	my @result = thaw $result_array;
 	@{$self->{slist}->{data}} = ();
-	foreach my $x (@result) {
-		push @{$self->{slist}->{data}}, @$x;
+	foreach my $x (@$result_array) {
+		push @{$self->{slist}->{data}}, $x;
 	}
 	$self->_update_progress_label('Showing');
 		$self->_end_progress(1);
@@ -291,7 +322,7 @@ sub add_filter {
 	do {
 		$button = $button->get_parent;
 	} until ($button->isa ('Gtk2::Button'));
-	my $combobox = Gtk2::Ex::ComboBox->new($labelbox, 'no-checkbox');
+	my $combobox = Gtk2::Ex::ComboBox->new($labelbox, 'with-buttons');
 	$combobox->set_list_preselected($list);
 	$button->signal_connect ('button-release-event' => 
 		sub { 
@@ -300,6 +331,38 @@ sub add_filter {
 		} 
 	);
 	$self->{combobox}->{$columnnumber} = $combobox;	
+}
+
+sub add_search_box {
+	my ($self, $columnnumber) = @_;
+	my $slist = $self->{slist};
+	$slist->set_headers_clickable(TRUE);
+	my $col = $slist->get_column($columnnumber);
+	my $title = $col->get_title;
+	my $label = Gtk2::Label->new ($title);
+	my $labelbox = _add_arrow($label);
+	$col->set_widget ($labelbox);
+	$labelbox->show_all;
+	my $button = $col->get_widget; # not a button
+	do {
+		$button = $button->get_parent;
+	} until ($button->isa ('Gtk2::Button'));
+	my $popupwindow = Gtk2::Ex::PopupWindow->new($labelbox);
+	my $frame = Gtk2::Frame->new;
+	my $entry = Gtk2::Entry->new;
+	$entry->signal_connect( 'changed' => 
+		sub {
+			$self->{params}->{columnfilter}->{$columnnumber} = $entry->get_text
+		}
+	);
+	$frame->add($entry);
+	$popupwindow->{window}->add($frame);
+	$button->signal_connect ('button-release-event' => 
+		sub { 
+			my ($self, $event) = @_;
+			$popupwindow->show;
+		} 
+	);
 }
 
 sub _add_arrow {
@@ -323,11 +386,21 @@ fetched using DBI. Also provides data filtering capabilities.
 
 =head1 DESCRIPTION
 
-If you have tons of relational data accessible using DBI, may be you would like 
-to view them in a Gtk2 widget. The ideal widget (in most cases) is the Gtk2::TreeView
-or its younger cousin, the Gtk2::Ex::Simple::List.
+May be you are dealing with tons of relational data, safely tucked away in an RDBMS, 
+accessible using DBI, and may be you would like  to view them in a Gtk2 widget. 
+The ideal widget (in most cases) is the Gtk2::TreeView or its younger cousin, 
+the Gtk2::Ex::Simple::List.
 
-Gtk2::Ex::DBITableFilter is a higher level widget built using Gtk2::Ex::Simple::List to achieve the following.
+But then you start worrying about questions like,
+
+- How do I prevent the UI from hanging while reading all the data ?
+
+- How do I present all the data in the TreeView without causing it to explode ?
+
+Gtk2::Ex::DBITableFilter comes to rescue !!
+
+Gtk2::Ex::DBITableFilter is a higher level widget built using Gtk2::Ex::Simple::List 
+to achieve the following.
 
 1. Ensure that arbitrary SQLs can be executed to fetch the data.
 
@@ -343,66 +416,115 @@ user to filter the data by column using a dropdown box).
 
 	use Gtk2::Ex::DBITableFilter;
 	
+	# Either define a new thread or using an existing thread
 	my $mythread = Gtk2::Ex::Threads::DBI->new( {
-		dsn		=> "DBI:CSV:f_dir=$datadir;csv_eol=\n;csv_sep_char=,",
-		user	=> '',
-		passwd	=> '',
-		attr	=> { RaiseError => 1, AutoCommit => 1 }
+		dsn	=> "dbi:SQLite2:data.dbl",
+		user	=> undef,
+		passwd	=> undef,
+		attr	=> { RaiseError => 1, AutoCommit => 0 }
 	});
 	
-
+	# Define a list
 	my $slist = Gtk2::Ex::Simple::List->new (
-		 undef			=> 'bool',
-		'ID'			=> 'text',
-		'Name'			=> 'text',
+		 undef		=> 'bool',
+		'ID'		=> 'text',
+		'Name'		=> 'text',
 		'Description'	=> 'text',
-		'Quantity'		=> 'int',
+		'Quantity'	=> 'int',
 	);
 
 	my $pagedlist = Gtk2::Ex::DBITableFilter->new($slist);
-	$pagedlist->make_checkable;
 	$pagedlist->add_filter(2, 
 		[[0,'cat'], [1,'rat'], [1,'dog'], [0,'elephant'], [0,'lion'], [0,'tiger']]
 	);
-	$pagedlist->count_using(\&count_records);
-	$pagedlist->fetch_using(\&fetch_records);
-	$pagedlist->register_thread($mythread);
+	$pagedlist->set_simple_sql(\&fetch_easy);
+	$pagedlist->set_thread($mythread);
 
-	# --------------------------------------------- #
-	# Do not forget to define the callback functions
-	# --------------------------------------------- #
-	sub fetch_records {
-		my ($dbh, $sqlparams) = @_;
-		my $params = thaw $sqlparams;
-		my $selectednames = $params->{params}->{columnfilter}->{2};
-		my $selecteddescs = $params->{params}->{columnfilter}->{3};
-		my $str1 = combine(@$selectednames);
-		my $str2 = combine(@$selecteddescs);
-		my $sth = $dbh->prepare(qq{
-			select selected, id, name, description, quantity
-			from table1
-			where name in $str1 and description in $str2
-			limit $start, $step
+	sub fetch_easy {
+		my ($params) = @_;
+		my $names 	= $params->{params}->{columnfilter}->{2};
+		my $descpattern	= $params->{params}->{columnfilter}->{3} || '';
+		my $valuelimit	= $params->{params}->{columnfilter}->{4}->[0];
+		my $names_str = combine(@$names);
+		return (qq{
+			select 
+				marked, id, name, description, quantity
+			from 
+				animals
+			where 
+				name in $names_str and 
+				description like '%$descpattern%'
 		});
-		$sth->execute();
-		my @result_array;
-		while (my @ary = $sth->fetchrow_array()) {
-			push @result_array, \@ary;
-		}
-		return \@result_array;	
 	}
 
+=head1 SCREENSHOTS
+
+http://ofey.blogspot.com/2005/09/gtk2exdbitablefilter.html
+
+=head1 METHODS
+
+=head2 new($slist);
+
+Constructor accepts a Gtk2::Ex::Simple::List as the argument.
+
+	my $pagedlist = Gtk2::Ex::DBITableFilter->new($slist);
+
+=head2 set_simple_sql(\&call_back);
+
+This method can be used to simplify things to a great extent. If you are using this
+method, then you don't need to explicitly define C<count_using(\&call_back)> and
+C<fetch_using(\&call_back)>.
+
+Instead you just need to define C<set_simple_sql(\&call_back)>.
+
+The callback in this case will return the SQL query to be executed. Note that you 
+don't need to specify C<limit> information in the SQL. Also, the count is obtained
+by modifying this SQL internally and executing it against the RDBMS.
+
+Internally, this method will use a subquery C<select count(*) from ($sql) temp>.
+Therefore, this method will work only if your underlying RDBMS supports subselects.
+
+Fortunately, most of the RDBMS do (SQLite, MySQL, Oracle, DB2).
+
+	sub fetch_easy {
+		my ($params) = @_;
+		my $names 	= $params->{params}->{columnfilter}->{2};
+		my $descpattern	= $params->{params}->{columnfilter}->{3} || '';
+		my $valuelimit	= $params->{params}->{columnfilter}->{4}->[0];
+		my $names_str = combine(@$names);
+		return (qq{
+			select 
+				selected, id, name, description, quantity
+			from 
+				animals
+			where 
+				name in $names_str and 
+				description like '%$descpattern%'
+		});
+	}
+
+Look at C<examples/filtered-table-sqlite.pl> for an example usage of this function.
+
+=head2 count_using(\&call_back);
+
+Define a callback function to count the records. This call back function will
+be called with certain parameters. Look at the example ...
+
 	sub count_records {
-		my ($dbh, $sqlparams) = @_;
-		my $params = thaw $sqlparams;
-		my $selectednames = $params->{params}->{columnfilter}->{2};
-		my $selecteddescs = $params->{params}->{columnfilter}->{3};
-		my $str1 = combine(@$selectednames);
-		my $str2 = combine(@$selecteddescs);
+		my ($dbh, $params) = @_;
+		my $names 	= $params->{params}->{columnfilter}->{2};
+		my $descpattern	= $params->{params}->{columnfilter}->{3} || '';
+		my $valuelimit	= $params->{params}->{columnfilter}->{4}->[0];
+		my $names_str = combine(@$names);
 		my $sth = $dbh->prepare(qq{
-			select count(*)
-			from table1
-			where name in $str1 and description in $str2
+			select 
+				count(*)
+			from 
+				animals
+			where
+				name in $names_str and 
+				description like '%$descpattern%' and
+				quantity $valuelimit
 		});
 		$sth->execute();
 		my @result_array;
@@ -412,25 +534,50 @@ user to filter the data by column using a dropdown box).
 		return \@result_array;	
 	}
 
-=head1 METHODS
+This function will give you full flexibility in defining and executing your SQL
+and meddling with the resultset if you like.
 
-=head2 new($slist);
-
-Constructor accepts a Gtk2::Ex::Simple::List as the argument.
-
-=head2 count_using(\&call_back);
-
-Define a callback function to count the records. This call back function will
-be called with certain parameters. Look at the example ...
+If your RDBMS does not support subselects, then you have to use this route.
 
 =head2 fetch_using(\&call_back);
 
 Define a callback function to fetch the records. This call back function will
 be called with certain parameters. Look at the example ...
 
-=head2 register_thread($mythread);
+	sub fetch_records {
+		my ($dbh, $params) = @_;
+		my $names 	= $params->{params}->{columnfilter}->{2};
+		my $descpattern	= $params->{params}->{columnfilter}->{3} || '';
+		my $valuelimit	= $params->{params}->{columnfilter}->{4}->[0];
+		my $names_str = combine(@$names);
+		my $sth = $dbh->prepare(qq{
+			select 
+				selected, id, name, description, quantity
+			from 
+				table1
+			where 
+				name in $names_str and 
+				description like '%$descpattern%' and
+				quantity $valuelimit
+			limit  
+				$params->{limit}->{start}, $params->{limit}->{step}
+		});
+		$sth->execute();
+		my @result_array;
+		while (my @ary = $sth->fetchrow_array()) {
+			push @result_array, \@ary;
+		}
+		return \@result_array;	
+	}
+
+This function will give you full flexibility in defining and executing your SQL
+and meddling with the resultset if you like.
+
+=head2 set_thread($mythread);
 
 The C<$mythread> object here is an instance of Gtk2::Ex::Threads::DBI
+
+	$pagedlist->set_thread($mythread);
 
 =head1 SEE ALSO
 
