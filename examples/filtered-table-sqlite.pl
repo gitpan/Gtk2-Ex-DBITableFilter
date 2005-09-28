@@ -20,6 +20,8 @@ my $slist = Gtk2::Ex::Simple::List->new (
 	'Name'			=> 'text',
 	'Description'	=> 'text',
 	'Quantity'		=> 'int',
+	'FromDate'			=> 'text',
+	'ToDate'			=> 'text',
 	 ''				=> 'text',
 );
 
@@ -33,13 +35,16 @@ my $mythread = Gtk2::Ex::Threads::DBI->new( {
 # ----------------------- #
 my $pagedlist = Gtk2::Ex::DBITableFilter->new($slist);
 $pagedlist->make_checkable;
-$pagedlist->add_filter(2, 
+$pagedlist->add_choice(2, 
 	[[0,'cat'], [1,'rat'], [1,'dog'], [0,'elephant'], [0,'lion'], [0,'tiger']]
 );
 $pagedlist->add_search_box(3);
-$pagedlist->add_filter(4, 
-	[[1,' >= 0 '], [0, ' >= 10 '], [0, ' >= 80 ']]
-);
+$pagedlist->add_date_filter(5);
+my $date = [ 'before', '1976-03-31', 'or', 'after', '1979-03-14' ];
+$pagedlist->add_date_filter(6, $date);
+#$pagedlist->add_choice(4, 
+#	[[1,' >= 0 '], [0, ' >= 10 '], [0, ' >= 80 ']]
+#);
 $pagedlist->set_simple_sql(\&fetch_easy);
 $pagedlist->set_thread($mythread);
 # ----------------------- #
@@ -79,27 +84,26 @@ sub terminate {
 
 sub fetch_easy {
 	my ($params) = @_;
-	my $names 		= $params->{params}->{columnfilter}->{2};
-	my $descpattern	= $params->{params}->{columnfilter}->{3} || '';
-	my $valuelimit	= $params->{params}->{columnfilter}->{4}->[0];
-	my $names_str = combine(@$names);
+	my $namematch 		= $params->{params}->{columnfilter}->{2} || '';
+	$namematch = "name in $namematch" if $namematch;	
+	my $descmatch	= $params->{params}->{columnfilter}->{3} || '';
+	$descmatch = "and description like $descmatch" if $descmatch;
+	my $datematch1 = $pagedlist->process_dates('fromdate', $params->{params}->{columnfilter}->{5});
+	my $datematch2 = $pagedlist->process_dates('fromdate', $params->{params}->{columnfilter}->{6});
 	return (qq{
 		select 
-			selected, id, name, description, quantity
+			selected, id, name, description, quantity, fromdate, todate
 		from 
 			animals
 		where 
-			name in $names_str and 
-			description like '%$descpattern%'
+			$namematch
+			$descmatch 
+			$datematch1
+			$datematch2
+		order by fromdate			
 	});
 }
 
-sub combine {
-	my (@list) = @_;
-	my $str = join '\',\'', @list;
-	$str = '(\''.$str.'\')';
-	return $str;
-}
 
 sub createdatabase {
 	my $dbh = DBI->connect( 
@@ -113,19 +117,24 @@ sub createdatabase {
 		local $dbh->{PrintError} = 0;
 		$dbh->do("DROP TABLE animals");
 	};
-	$dbh->do( "CREATE TABLE animals ( selected,id,name,description,quantity )" );
+	$dbh->do( "CREATE TABLE animals ( selected,id,name,description,quantity,fromdate,todate)" );
 	print "Loading data into SQLite table ... Will take a while\n";
 	my @names = qw /cat rat dog elephant lion tiger/;
 	my @descs = qw /furry big small herbivore/;
 	my $count = 0;
-	my $sth = $dbh->prepare( "INSERT INTO animals VALUES ( ?, ?, ?, ?, ? ) " );
+	my $sth = $dbh->prepare( "INSERT INTO animals VALUES ( ?, ?, ?, ?, ?, ?, ?) " );
 	for my $i (0..100) {
 		for my $j (0..110) {
 			my $selected = int rand(2);
 			my $name = $names[int rand(6)];
 			my $desc = $descs[int rand(4)];				
 			my $qty = int rand(100);
-			$sth->execute($selected, $count, $name, $desc,$qty);
+			my $year = 1950 + int rand(50);
+			my $month = 1 + int rand(12);
+			my $day = 1 + int rand(28);
+			$day = "0$day" if $day < 10;
+			$month = "0$month" if $month < 10;
+			$sth->execute($selected, $count, $name, $desc, $qty, "$year-$month-$day", "$year-$month-$day");
 			$count++;
 		}
 	}

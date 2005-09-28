@@ -1,6 +1,6 @@
 package Gtk2::Ex::DBITableFilter;
 
-our $VERSION = '0.02';
+our $VERSION = '0.03';
 
 use strict;
 use warnings;
@@ -9,6 +9,9 @@ use Gtk2::Ex::Simple::List;
 use Glib qw(TRUE FALSE);
 use Data::Dumper;
 use Gtk2::Ex::ComboBox;
+use Gtk2::Ex::Simple::Menu;
+use Gtk2::Ex::DBITableFilter::BrowserBar;
+use Gtk2::Ex::DBITableFilter::FilterWidget;
 
 sub new {
 	my ($class, $slist) = @_;
@@ -18,8 +21,14 @@ sub new {
 	$self->{slist} = $slist;
 	$self->{dumpedcachedparams} = undef;
 	$self->{params} = undef;
-	$self->{progress} = undef;
+	$self->{browserbar} = undef;
+	$self->{filterwidget} = Gtk2::Ex::DBITableFilter::FilterWidget->new($self);
 	return $self;
+}
+
+sub process_dates {
+	my ($self, $fieldname, $list) = @_;
+	return $self->{filterwidget}->process_dates($fieldname, $list);
 }
 
 sub set_simple_sql {
@@ -29,6 +38,7 @@ sub set_simple_sql {
 		my $sql = &$callback($params);
 		my $countsql = $sql;
 		$countsql = 'select count(*) from ('.$sql.') DBITableFilterTemp';
+		print Dumper $countsql;
 		my $sth = $dbh->prepare($countsql);
 		$sth->execute();
 		my @result_array;
@@ -45,6 +55,7 @@ sub set_simple_sql {
 			.$params->{limit}->{start}
 			.' , '
 			.$params->{limit}->{step};
+		print Dumper $fetchsql;
 		my $sth = $dbh->prepare($fetchsql);
 		$sth->execute();
 		my @result_array;
@@ -93,110 +104,32 @@ sub get_widget {
 	my $scrolledwindow= Gtk2::ScrolledWindow->new (undef, undef);
 	$scrolledwindow->set_policy ('automatic', 'automatic');
 	$scrolledwindow->add($self->{slist});	
-	my $nextbutton = Gtk2::Button->new_from_stock('gtk-go-forward');
-	my $prevbutton = Gtk2::Button->new_from_stock('gtk-go-back');
-	my $firstbutton = Gtk2::Button->new_from_stock('gtk-goto-first');
-	my $lastbutton = Gtk2::Button->new_from_stock('gtk-goto-last');
-	$nextbutton->signal_connect (clicked => 
-		sub {
-			my $limit = $self->{limit};
-			return if $limit->{end} >= $limit->{total};
-			$limit->{start} += $limit->{increment} ;
-			$limit->{end} += $limit->{increment} ;
-			$limit->{end} = $limit->{total} 
-				if $limit->{end} >= $limit->{total};
-			$limit->{step} = $limit->{increment};
-			if ($limit->{start} + $limit->{increment} > $limit->{end}) {
-				$limit->{step} = $limit->{end} - $limit->{start};
-			}
-			$self->{limit} = $limit;
-			$self->refresh;
-		}
-	);
-	$prevbutton->signal_connect (clicked => 
-		sub {
-			my $limit = $self->{limit};
-			return if $limit->{start} <= 0;
-			$limit->{start} -= $limit->{increment} ;
-			$limit->{end} = 
-				$limit->{start} + $limit->{increment} ;
-			$limit->{step} = $limit->{increment};
-			if ($limit->{start} + $limit->{increment} > $limit->{end}) {
-				$limit->{step} = $limit->{end} - $limit->{start};
-			}
-			$self->{limit} = $limit;
-			$self->refresh;
-		}
-	);
-	$firstbutton->signal_connect (clicked => 
-		sub {
-			$self->_go_to_first;
-			$self->refresh;
-		}
-	);
-	$lastbutton->signal_connect (clicked => 
-		sub {
-			my $limit = $self->{limit};
-			$limit->{start} = int($limit->{total}/$limit->{increment})* $limit->{increment};					
-			$limit->{end} = $limit->{total};
-			$limit->{step} = $limit->{increment};
-			if ($limit->{start} + $limit->{increment} > $limit->{end}) {
-				$limit->{step} = $limit->{end} - $limit->{start};
-			}
-			$self->{limit} = $limit;
-			$self->refresh;
-		}
-	);
-	my $progressbar = Gtk2::ProgressBar->new;
-	$self->{progress}->{bar} = $progressbar;	
-	$progressbar->set_text('Showing 0 records');
-	my $hboxleft = Gtk2::HBox->new (TRUE, 0);
-	$hboxleft->pack_start ($firstbutton, FALSE, TRUE, 0);    
-	$hboxleft->pack_start ($prevbutton, FALSE, TRUE, 0);    
-	my $hboxright = Gtk2::HBox->new (TRUE, 0);
-	$hboxright->pack_start ($nextbutton, FALSE, TRUE, 0);  
-	$hboxright->pack_start ($lastbutton, FALSE, TRUE, 0);    
-	my $hboxbottom = Gtk2::HBox->new (FALSE, 0);
-	$hboxbottom->pack_start ($hboxleft, FALSE, TRUE, 0);    	
-	$hboxbottom->pack_start ($progressbar, TRUE, TRUE, 0);    	
-	$hboxbottom->pack_start ($hboxright, FALSE, TRUE, 0);    	
+	my $bbar = Gtk2::Ex::DBITableFilter::BrowserBar->new($self);
+	$self->{browserbar} = $bbar;
+	my $hboxbottom = $bbar->get_widget;
 	my $vbox = Gtk2::VBox->new (FALSE, 0);
 	$vbox->pack_start ($scrolledwindow, TRUE, TRUE, 0);
 	$vbox->pack_start ($hboxbottom, FALSE, TRUE, 0);    
 	return $vbox;
 }
 
-sub _go_to_first {
-	my ($self) = @_;
-	my $limit = $self->{limit};
-	$limit->{start} = 0;
-	$limit->{end} = $limit->{increment} ;
-	$limit->{end} = $limit->{total} if $limit->{end} >= $limit->{total};
-	$limit->{step} = $limit->{increment};
-	if ($limit->{start} + $limit->{increment} > $limit->{end}) {
-		$limit->{step} = $limit->{end} - $limit->{start};
-	}
-	$self->{limit} = $limit;
-}
-
 sub _update_count {
 	my ($self, $params) = @_;
-	$self->{progress}->{bar}->set_text('Counting');
-	$self->_start_progress(0, 0.4);
+	$self->{browserbar}->update_progress_label('Counting');
+	$self->{browserbar}->start_progress(0, 0.4);
 	$self->{count_records_query}->execute($params);
 }
 
 sub refresh {
 	my ($self) = @_;
-	$self->_update_params;
 	my $str1 = $self->{dumpedcachedparams} || '';
 	my $str2 = Dumper $self->{params};
 	if ($str1 eq $str2) {
 		# No need to update the count
 		print "No need to count\n";
-		$self->_end_progress(0.4);
-		$self->_start_progress(0.5, 1.0);
-		$self->_update_progress_label('Fetching');
+		$self->{browserbar}->end_progress(0.4);
+		$self->{browserbar}->start_progress(0.5, 1.0);
+		$self->{browserbar}->update_progress_label('Fetching');
 		$self->{fetch_records_query}->execute(
 			{params => $self->{params}, limit => $self->{limit}}
 		);		
@@ -208,69 +141,23 @@ sub refresh {
 	}	
 }
 
-sub _update_params {
-	my ($self) = @_;
-	my $comboboxhash = $self->{combobox};
-	foreach my $key (keys %$comboboxhash) {
-		$self->{params}->{columnfilter}->{$key} = 
-			$comboboxhash->{$key}->get_selected_values->{'selected-values'};
-	}
-}
-
 sub _post_count_records {
 	my ($self, $result_array) = @_;
 	my $count = $result_array->[0];
 	$self->{limit}->{total} = $count;
-	$self->_go_to_first;
-	$self->refresh;
-}
-
-sub _update_progress_label {
-	my ($self, $action) = @_;
-	my $limit = $self->{limit};
-	$limit->{end} = $limit->{total} if $limit->{end} >= $limit->{total};
-	my $countstring = "$action ".$limit->{start}.
-	                  ' to '.$limit->{end}.
-	                  ' of '.$limit->{total}.'records';
-	$self->{progress}->{bar}->set_text($countstring);
-	$self->{limit} = $limit;
+	$self->{browserbar}->_go_to_first;
 }
 
 sub _post_fetch_records {
 	my ($self, $result_array) = @_;
-	$self->_update_progress_label('Rendering');
+	$self->{browserbar}->update_progress_label('Rendering');
 	@{$self->{slist}->{data}} = ();
 	foreach my $x (@$result_array) {
 		push @{$self->{slist}->{data}}, $x;
 	}
-	$self->_update_progress_label('Showing');
-		$self->_end_progress(1);
-	$self->{progress}->{bar}->set_fraction(0);
-}
-
-sub _start_progress {
-	my ($self, $from, $to) = @_;
-	$self->{progress}->{count} = 1;
-	$self->{progress}->{timer} = 
-		Glib::Timeout->add(100, \&_make_progress, [$self, $from, $to]);
-}
-
-sub _make_progress {
-	my $ary = shift;
-	my ($self, $from, $to) = @$ary;	
-	my $pbar = $self->{progress}->{bar};
-	my $fraction = $from + ($to - $from)*(1 - 0.9**$self->{progress}->{count});
-	$pbar->set_fraction($fraction);
-	$self->{progress}->{count}++;
-	return 1;
-}
-
-sub _end_progress {
-	my ($self, $to) = @_;
-	my $pbar = $self->{progress}->{bar};
-	$pbar->set_fraction($to);
-	Glib::Source->remove($self->{progress}->{timer});
-	$self->{progress}->{count} = 1;
+	$self->{browserbar}->update_progress_label('Showing');
+		$self->{browserbar}->end_progress(1);
+	$self->{browserbar}->end_progress(0);		
 }
 
 sub make_checkable {
@@ -308,70 +195,19 @@ sub make_checkable {
 	);
 }
 
-sub add_filter {
+sub add_choice {
 	my ($self, $columnnumber, $list) = @_;
-	my $slist = $self->{slist};
-	$slist->set_headers_clickable(TRUE);
-	my $col = $slist->get_column($columnnumber);
-	my $title = $col->get_title;
-	my $label = Gtk2::Label->new ($title);
-	my $labelbox = _add_arrow($label);
-	$col->set_widget ($labelbox);
-	$labelbox->show_all;
-	my $button = $col->get_widget; # not a button
-	do {
-		$button = $button->get_parent;
-	} until ($button->isa ('Gtk2::Button'));
-	my $combobox = Gtk2::Ex::ComboBox->new($labelbox, 'with-buttons');
-	$combobox->set_list_preselected($list);
-	$button->signal_connect ('button-release-event' => 
-		sub { 
-			my ($self, $event) = @_;
-			$combobox->show;
-		} 
-	);
-	$self->{combobox}->{$columnnumber} = $combobox;	
+	$self->{filterwidget}->add_choice($columnnumber, $list);
 }
 
 sub add_search_box {
 	my ($self, $columnnumber) = @_;
-	my $slist = $self->{slist};
-	$slist->set_headers_clickable(TRUE);
-	my $col = $slist->get_column($columnnumber);
-	my $title = $col->get_title;
-	my $label = Gtk2::Label->new ($title);
-	my $labelbox = _add_arrow($label);
-	$col->set_widget ($labelbox);
-	$labelbox->show_all;
-	my $button = $col->get_widget; # not a button
-	do {
-		$button = $button->get_parent;
-	} until ($button->isa ('Gtk2::Button'));
-	my $popupwindow = Gtk2::Ex::PopupWindow->new($labelbox);
-	my $frame = Gtk2::Frame->new;
-	my $entry = Gtk2::Entry->new;
-	$entry->signal_connect( 'changed' => 
-		sub {
-			$self->{params}->{columnfilter}->{$columnnumber} = $entry->get_text
-		}
-	);
-	$frame->add($entry);
-	$popupwindow->{window}->add($frame);
-	$button->signal_connect ('button-release-event' => 
-		sub { 
-			my ($self, $event) = @_;
-			$popupwindow->show;
-		} 
-	);
+	$self->{filterwidget}->add_search_box($columnnumber);
 }
 
-sub _add_arrow {
-	my ($label) = @_;
-	my $arrow = Gtk2::Arrow -> new('down', 'none');
-	my $labelbox = Gtk2::HBox->new (FALSE, 0);
-	$labelbox->pack_start ($label, FALSE, FALSE, 0);    
-	$labelbox->pack_start ($arrow, FALSE, FALSE, 0);    
-	return $labelbox;
+sub add_date_filter {
+	my ($self, $columnnumber, $preselected) = @_;
+	$self->{filterwidget}->add_date_filter($columnnumber, $preselected);
 }
 
 1;
@@ -434,7 +270,7 @@ user to filter the data by column using a dropdown box).
 	);
 
 	my $pagedlist = Gtk2::Ex::DBITableFilter->new($slist);
-	$pagedlist->add_filter(2, 
+	$pagedlist->add_choice(2, 
 		[[0,'cat'], [1,'rat'], [1,'dog'], [0,'elephant'], [0,'lion'], [0,'tiger']]
 	);
 	$pagedlist->set_simple_sql(\&fetch_easy);
